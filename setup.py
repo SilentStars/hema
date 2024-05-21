@@ -11,7 +11,7 @@ setup(
     description=DESCRIPTION,
     long_description=DESCRIPTION,
     packages=find_packages(),
-    install_requires=[],
+    install_requires=['torch', 'torchvision', 'torchaudio'],
     keyword=['emg'],
     classifiers=[]
 )
