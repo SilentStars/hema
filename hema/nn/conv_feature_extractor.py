@@ -3,12 +3,17 @@ import torch
 from conv_blocks import DownsampleBlock
 from typing import List, Tuple
 
+from fairseq.models.wav2vec import (
+    ConvFeatureExtractionModel,
+    Wav2Vec2Config,
+    TransformerEncoder,
+)
+
 class FeatureExtractor(torch.nn.Module):
     def __init__(
         self,
         conv_layers: List[Tuple[int, int, int]],
         in_dim: int = 8,
-        dropout: float = 0.0,
     ):
         super().__init__()
         

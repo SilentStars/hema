@@ -14,7 +14,6 @@ class Conformer(nn.Module):
     the conformer encoder shown in the paper.
 
     Args:
-        num_classes (int): Number of classification classes
         input_dim (int, optional): Dimension of input vector
         encoder_dim (int, optional): Dimension of conformer encoder
         num_encoder_layers (int, optional): Number of conformer blocks
@@ -37,17 +36,16 @@ class Conformer(nn.Module):
     """
     def __init__(
             self,
-            num_classes: int,
             input_dim: int = 8,
             encoder_dim: int = 768,
             num_encoder_layers: int = 6,
             num_attention_heads: int = 8,
             feed_forward_expansion_factor: int = 4,
             conv_expansion_factor: int = 2,
-            input_dropout_p: float = 0.1,
-            feed_forward_dropout_p: float = 0.1,
-            attention_dropout_p: float = 0.1,
-            conv_dropout_p: float = 0.1,
+            input_dropout_p: float = 0,
+            feed_forward_dropout_p: float = 0,
+            attention_dropout_p: float = 0,
+            conv_dropout_p: float = 0,
             conv_kernel_size: int = 31,
             half_step_residual: bool = True,
     ) -> None:
@@ -66,7 +64,7 @@ class Conformer(nn.Module):
             conv_kernel_size=conv_kernel_size,
             half_step_residual=half_step_residual,
         )
-        self.fc = Linear(encoder_dim, num_classes, bias=False)
+        self.fc = Linear(encoder_dim, encoder_dim, bias=False)
 
     def count_parameters(self) -> int:
         """ Count parameters of encoder """
@@ -90,5 +88,4 @@ class Conformer(nn.Module):
         """
         encoder_outputs, encoder_output_lengths = self.encoder(inputs, input_lengths)
         outputs = self.fc(encoder_outputs)
-        outputs = nn.functional.log_softmax(outputs, dim=-1)
         return outputs, encoder_output_lengths
