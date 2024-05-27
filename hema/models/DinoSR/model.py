@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional
 from omegaconf import II
@@ -186,6 +187,18 @@ class DinoSR(torch.nn.Module):
                 i:torch.ones([self.codebook_size]) for i in range(self.n_codebooks)
             }
             self.shared_module_state_dict = None
+        
+        self.num_updates = 0
 
+    def make_ema_teacher(self):
+        self.ema = EMA(self, decay=1)
 
-
+    def move_codebook_to_gpu(self):
+        # Move codebook to GPU
+        device = next(self.encoder.parameters()).device
+        self.codebooks = {
+            i:self.codebooks[i].to(device) for i in range(self.n_codebooks)
+        }
+        self.codebook_cnts = {
+            i:self.codebook_cnts[i].to(device) for i in range(self.n_codebooks)
+        }
