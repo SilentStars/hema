@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-VERSION = '0.0.5'
+VERSION = '0.0.6'
 DESCRIPTION = 'EMG analysis toolbox by Hou.'
 
 setup(
@@ -11,7 +11,7 @@ setup(
     description=DESCRIPTION,
     long_description=DESCRIPTION,
     packages=find_packages(),
-    install_requires=['torch', 'torchvision', 'torchaudio'],
+    install_requires=['torch', 'torchvision', 'torchaudio', 'numpy', 'scipy'],
     keyword=['emg'],
     classifiers=[]
 )
