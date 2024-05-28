@@ -5,6 +5,16 @@ from torch.nn import BatchNorm1d, LeakyReLU, Conv1d, GELU
 def weights_init(m):
     if isinstance(m, nn.Conv1d):
         torch.nn.init.xavier_normal_(m.weight)
+        
+class TransposeLast(nn.Module):
+    def __init__(self, deconstruct_idx=None):
+        super().__init__()
+        self.deconstruct_idx = deconstruct_idx
+
+    def forward(self, x):
+        if self.deconstruct_idx is not None:
+            x = x[self.deconstruct_idx]
+        return x.transpose(-2, -1)
 
 class DownsampleBlock(nn.Module):
     def __init__(self, num_ins, num_outs, kernel_size=5, stride=2):
@@ -12,12 +22,27 @@ class DownsampleBlock(nn.Module):
         
         self.conv = nn.Sequential(
             Conv1d(num_ins, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            GELU(negative_slope=1e-2, inplace=True),
+            nn.Sequential(
+                TransposeLast(),
+                nn.LayerNorm(num_outs),
+                TransposeLast(),
+            ),
+            GELU(),
             Conv1d(num_outs, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            GELU(negative_slope=1e-2, inplace=True),
+            nn.Sequential(
+                TransposeLast(),
+                nn.LayerNorm(num_outs),
+                TransposeLast(),
+            ),
+            GELU(),
             Conv1d(num_outs, num_outs, kernel_size, stride, padding=int(kernel_size/2), bias=False),
+            nn.Sequential(
+                TransposeLast(),
+                nn.LayerNorm(num_outs),
+                TransposeLast(),
+            ),
         )
-        self.ac = GELU(negative_slope=1e-2, inplace=True)
+        self.ac = GELU()
 
         self.conv.apply(weights_init)
     

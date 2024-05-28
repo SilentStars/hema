@@ -7,12 +7,14 @@ from omegaconf import II
 from EMA import EMA
 from utils import compute_mask_indices, index_put, GradMultiply 
 from nn.conv_feature_extractor import FeatureExtractor
-from conformer.model import Conformer
+import conformer
 
 MASKING_DISTRIBUTION_CHOICES = (["static", "uniform", "normal", "poisson"])
 
 @dataclass
 class config():
+    encoder_config: conformer.TransformerEncoderConfig = field(default=conformer.TransformerEncoderConfig())
+    
     # Codebook related settings
     codebook_size: int = field(default=256)
     normal_init_codebook: bool = field(default=False)
@@ -373,7 +375,7 @@ class DinoSR(torch.nn.Module):
                 mask=False
             )
         
-        target_layer_results = [l[2] for l in y["layer_results"]
+        target_layer_results = [l[2] for l in y["layer_results"]]
 
     def extract_features(
         self, source, padding_mask, mask=False, layer=None
