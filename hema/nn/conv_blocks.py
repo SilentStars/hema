@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.nn import BatchNorm1d, LeakyReLU, Conv1d
+from torch.nn import BatchNorm1d, LeakyReLU, Conv1d, GELU
 
 def weights_init(m):
     if isinstance(m, nn.Conv1d):
@@ -12,21 +12,18 @@ class DownsampleBlock(nn.Module):
         
         self.conv = nn.Sequential(
             Conv1d(num_ins, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            BatchNorm1d(num_outs),
-            LeakyReLU(negative_slope=1e-2, inplace=True),
+            GELU(negative_slope=1e-2, inplace=True),
             Conv1d(num_outs, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            BatchNorm1d(num_outs),
-            LeakyReLU(negative_slope=1e-2, inplace=True),
+            GELU(negative_slope=1e-2, inplace=True),
             Conv1d(num_outs, num_outs, kernel_size, stride, padding=int(kernel_size/2), bias=False),
         )
-        self.bn = BatchNorm1d(num_outs)
-        self.ac = LeakyReLU(negative_slope=1e-2, inplace=True)
+        self.ac = GELU(negative_slope=1e-2, inplace=True)
 
         self.conv.apply(weights_init)
     
     def forward(self, x):
         x = self.conv(x)
-        x = self.ac(self.bn(x))
+        x = self.ac(x)
         
         return x
 

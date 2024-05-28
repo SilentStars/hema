@@ -154,6 +154,7 @@ class DinoSR(torch.nn.Module):
         
         # Conformer Encoder
         self.conformer_encoder = Conformer(self.embed, self.embed, cfg.num_encoder_layers, cfg.num_attention_heads)
+        self.layer_norm = torch.nn.LayerNorm(self.extractor_dim)
         
         # Codebooks
         self.pre_encoder_copied = False
@@ -202,3 +203,186 @@ class DinoSR(torch.nn.Module):
         self.codebook_cnts = {
             i:self.codebook_cnts[i].to(device) for i in range(self.n_codebooks)
         }
+     
+    def freeze_shared_modules(self):
+        # Hack to avoid updating any of the shared modules (e.g., Weight Decay from optimizer)
+        # using WD=0 + torch.no_grad() for following modules will still result in higher loss somehow
+        if self.shared_module_state_dict is None:
+            self.shared_module_state_dict = {}
+            self.shared_module_state_dict['feature_extractor'] = self.feature_extractor.state_dict()
+            self.shared_module_state_dict['layer_norm'] = self.layer_norm.state_dict()
+            self.shared_module_state_dict['post_extract_proj'] = self.post_extract_proj.state_dict()
+        else:
+            self.feature_extractor.load_state_dict(self.shared_module_state_dict['feature_extractor'])
+            self.layer_norm.load_state_dict(self.shared_module_state_dict['layer_norm'])
+            self.post_extract_proj.load_state_dict(self.shared_module_state_dict['post_extract_proj'])
+
+    def copy_shared_modules(self):
+        if not self.pre_encoder_copied:
+            self.cnn_copy = EMA(
+                self.feature_extractor,
+                1,
+                skip_keys=set(),
+            )
+            self.ln_copy = EMA(
+                self.layer_norm,
+                1,
+                skip_keys=set(),
+            )
+            self.proj_copy = EMA(
+                self.post_extract_proj,
+                1,
+                skip_keys=set(),
+            )
+            self.pre_encoder_copied = True
+
+    def set_num_updates(self, num_updates):
+        super().set_num_updates(num_updates)
+
+        if self.cfg.freeze_teacher_step!=-1 and num_updates>=self.cfg.freeze_teacher_step:
+            if self.cfg.freeze_pre_enc_modules:
+                self.freeze_shared_modules()
+            else:
+                self.copy_shared_modules()
+            self.cfg.ema_end_decay = 1
+
+        if self.ema is None and (self.discrete or self.final_proj is not None):
+            self.make_ema_teacher()
+        elif self.training and self.ema is not None:
+            if self.cfg.ema_decay != self.cfg.ema_end_decay:
+                if num_updates >= self.cfg.ema_anneal_end_step:
+                    decay = self.cfg.ema_end_decay
+                else:
+                    decay = get_annealed_rate(
+                        self.cfg.ema_decay,
+                        self.cfg.ema_end_decay,
+                        num_updates,
+                        self.cfg.ema_anneal_end_step,
+                    )
+                self.ema.set_decay(decay)
+            if self.ema.get_decay() < 1:
+                self.ema.step(self.encoder if self.cfg.ema_transformer_only else self)
+        
+        if self.cfg.codebook_init_decay == self.cfg.codebook_end_decay:
+            self.codebook_decay = self.cfg.codebook_init_decay
+        else:
+            if num_updates >= self.cfg.codebook_end_decay_step:
+                self.codebook_decay = self.cfg.codebook_end_decay
+            else:
+                self.codebook_decay = get_annealed_rate(
+                    self.cfg.codebook_init_decay,
+                    self.cfg.codebook_end_decay,
+                    num_updates,
+                    self.cfg.codebook_end_decay_step,
+                )
+
+        self.num_updates = num_updates
+  
+
+    def apply_mask(
+        self,
+        x: torch.Tensor,
+        padding_mask,
+        mask_indices=None,
+        mask_channel_indices=None,
+    ):
+        B, C, T = x.shape
+        
+        # No channel mask here.
+        if self.mask_prob > 0:
+            if mask_indices is None:
+                mask_indices = compute_mask_indices(
+                    (B, T),
+                    padding_mask,
+                    self.mask_prob,
+                    self.mask_length,
+                    self.mask_selection,
+                    self.mask_other,
+                    min_masks=1,
+                    no_overlap=self.no_mask_overlap,
+                    min_space=self.mask_min_space,
+                    require_same_masks=self.cfg.require_same_masks,
+                    mask_dropout=self.cfg.mask_dropout,
+                )
+                mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            x = index_put(x, mask_indices, self.mask_emb)
+        else:
+            mask_indices = None
+        
+        return x, mask_indices
+    
+    def forward(
+        self,
+        source: torch.Tensor,
+        padding_mask=None,
+        mask=True,
+        feature_only=False,
+        layer=None,
+        mask_indices=None,
+        mask_channel_indices=None,
+        padding_count=None,
+    ):
+        # feature shape Batch Channel Length
+        features = source
+        
+        features = self.feature_extractor(features)
+        features = features.transpose(1, 2)
+        # Shape B L C
+        features = self.layer_norm(features)
+        
+        if self.post_extract_proj is not None:
+            features = self.post_extract_proj(features)
+            
+        pre_encoder_features = None
+        if self.pre_encoder_copied:
+            # Copied pre-encoder modules used for teacher model
+            self.cnn_copy.model.eval()
+            self.ln_copy.model.eval()
+            self.proj_copy.model.eval()
+            with torch.no_grad():
+                pre_encoder_features = self.cnn_copy.model(source)
+                pre_encoder_features = pre_encoder_features.transpose(1, 2)
+                pre_encoder_features = self.ln_copy.model(pre_encoder_features)
+                pre_encoder_features = self.proj_copy.model(pre_encoder_features) 
+        elif self.cfg.ema_transformer_only:
+            pre_encoder_features = features.clone()
+        
+        # features = self.dropout_input(features)
+        if mask:
+            x, mask_indices = self.apply_mask(
+                features,
+                padding_mask,
+                mask_indices=mask_indices,
+                mask_channel_indices=mask_channel_indices,
+            )
+        else:
+            x = features
+            mask_indices = None
+        
+        x, _ = self.conformer_encoder(x, x.shape[1])
+        
+        if feature_only:
+            return x
+        
+        with torch.no_grad():
+            self.ema.model.eval()
+            
+            y = self.ema.model.extract_features(
+                source,
+                padding_mask,
+                mask=False
+            )
+        
+        target_layer_results = [l[2] for l in y["layer_results"]
+
+    def extract_features(
+        self, source, padding_mask, mask=False, layer=None
+    ):
+        res = self.forward(
+            source,
+            padding_mask,
+            mask=mask,
+            features_only=True,
+            layer=layer,
+        )
+        return res
