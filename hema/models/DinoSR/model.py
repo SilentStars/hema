@@ -5,16 +5,14 @@ from typing import Optional
 from omegaconf import II
 
 from EMA import EMA
-from utils import compute_mask_indices, index_put, GradMultiply 
+from models.utils import compute_mask_indices, index_put, GradMultiply 
 from nn.conv_feature_extractor import FeatureExtractor
-import conformer
+from conformer.model import ConformerEncoder, TransformerEncoderConfig
 
 MASKING_DISTRIBUTION_CHOICES = (["static", "uniform", "normal", "poisson"])
 
 @dataclass
-class config():
-    encoder_config: conformer.TransformerEncoderConfig = field(default=conformer.TransformerEncoderConfig())
-    
+class config(TransformerEncoderConfig):    
     # Codebook related settings
     codebook_size: int = field(default=256)
     normal_init_codebook: bool = field(default=False)
@@ -122,7 +120,6 @@ def get_annealed_rate(start, end, curr_step, total_steps):
     pct_remaining = 1 - curr_step / total_steps
     return end - r * pct_remaining
 
-
 CONV_LAYERS = [(768, 9, 2), (768, 5, 2), (768, 5, 2)]
 class DinoSR(torch.nn.Module):
     def __init__(self, cfg: config):
@@ -155,7 +152,12 @@ class DinoSR(torch.nn.Module):
         )
         
         # Conformer Encoder
-        self.conformer_encoder = Conformer(self.embed, self.embed, cfg.num_encoder_layers, cfg.num_attention_heads)
+        self.conformer_encoder = ConformerEncoder(
+            self.embed, 
+            self.embed, 
+            cfg.num_encoder_layers, 
+            cfg.num_attention_heads
+        )
         self.layer_norm = torch.nn.LayerNorm(self.extractor_dim)
         
         # Codebooks

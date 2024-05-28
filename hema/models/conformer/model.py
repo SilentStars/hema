@@ -9,12 +9,52 @@ from enum import Enum, EnumMeta
 from typing import Callable, Dict, List, Optional, Tuple
 import math
 
+from utils import index_put
+
 @dataclass
 class TransformerEncoderConfig():
-    encoder_layer: int = field(default=12)
+    encoder_layers: int = field(default=12)
     encoder_embed_dim: int = field(default=768)
     encoder_ffn_embed_dim: int = field(default=3072)
     encoder_attn_heads: int = field(default=8)
+    
+    final_dim: int = field(
+        default=0,
+        metadata={
+            "help": "project final representations and targets to this many dimensions."
+            "set to encoder_embed_dim is <= 0"
+        },
+    )
+    layer_norm_first: bool = field(
+        default=False, metadata={"help": "apply layernorm first in the transformer"}
+    )
+    conv_feature_layers: str = field(
+        default="[(512, 10, 5)] + [(512, 3, 2)] * 4 + [(512,2,2)] + [(512,2,2)]",
+        metadata={
+            "help": "string describing convolutional feature extraction layers in form of a python list that contains "
+            "[(dim, kernel_size, stride), ...]"
+        },
+    )
+    conv_bias: bool = field(
+        default=False, metadata={"help": "include bias in conv encoder"}
+    )
+    
+    # Conformer
+    depthwise_conv_kernel_size: int = field(
+        default=31,
+        metadata={
+            "help": "depthwise-conv-kernel-size for convolution in conformer layer"
+        },
+    )
+    attn_type: str = field(
+        default="espnet",
+        metadata={"help": "if espnet use ESPNET MHA"},
+    )
+    pos_enc_type: str = field(
+        default="rope",
+        metadata={"help": "Positional encoding type to use in conformer"},
+    )
+    fp16: bool = field(default=True, metadata={"help": "If fp16 is being used"})
 
     # dropouts
     dropout: float = field(
@@ -38,6 +78,44 @@ class TransformerEncoderConfig():
         metadata={"help": "dropout to apply to the features (after feat extr)"},
     )
     
+    # Position embedding
+    max_positions: int = field(default=100000, metadata={"help": "Max positions"})
+
+def get_activation_fn(activation: str) -> Callable:
+    """Returns the activation function corresponding to `activation`"""
+
+    def gelu_accurate(x):
+        if not hasattr(gelu_accurate, "_a"):
+            gelu_accurate._a = math.sqrt(2 / math.pi)
+        return (
+            0.5
+            * x
+            * (1 + torch.tanh(gelu_accurate._a * (x + 0.044715 * torch.pow(x, 3))))
+        )
+
+    def gelu(x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.gelu(x.float()).type_as(x)
+
+    if activation == "relu":
+        return F.relu
+    elif activation == "relu_squared":
+        def relu_squared(x: torch.Tensor):
+            return F.relu(x).pow(2)
+        return relu_squared
+    elif activation == "gelu":
+        return gelu
+    elif activation == "gelu_fast":
+        return gelu_accurate
+    elif activation == "gelu_accurate":
+        return gelu_accurate
+    elif activation == "tanh":
+        return torch.tanh
+    elif activation == "linear":
+        return lambda x: x
+    elif activation == "swish":
+        return torch.nn.SiLU
+    else:
+        raise RuntimeError("--activation-fn {} not supported".format(activation)) 
 
 def rotate_half(x):
     x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
@@ -82,7 +160,72 @@ class RotaryPositionalEmbedding(torch.nn.Module):
             self.cos_cached = emb.cos()[:, None, None, :]
             self.sin_cached = emb.sin()[:, None, None, :]
         return self.cos_cached, self.sin_cached
-    
+
+class RelPositionalEncoding(nn.Module):
+    """Relative positional encoding module (new implementation).
+
+    Args:
+        d_model: Embedding dimension.
+        dropout_rate: Dropout rate.
+        max_len: Maximum input length.
+    """
+
+    def __init__(self, max_len, d_model):
+        """Construct an PositionalEncoding object."""
+        super(RelPositionalEncoding, self).__init__()
+        self.d_model = d_model
+        self.pe = None
+        self.extend_pe(torch.tensor(0.0).expand(1, max_len))
+
+    def extend_pe(self, x):
+        """Reset the positional encodings."""
+        if self.pe is not None:
+            # self.pe contains both positive and negative parts
+            # the length of self.pe is 2 * input_len - 1
+            if self.pe.size(1) >= x.size(1) * 2 - 1:
+                if self.pe.dtype != x.dtype or self.pe.device != x.device:
+                    self.pe = self.pe.to(dtype=x.dtype, device=x.device)
+                return
+        # Suppose `i` means to the position of query vecotr and `j` means the
+        # position of key vector. We use position relative positions when keys
+        # are to the left (i>j) and negative relative positions otherwise (i<j).
+        pe_positive = torch.zeros(x.size(1), self.d_model)
+        pe_negative = torch.zeros(x.size(1), self.d_model)
+        position = torch.arange(0, x.size(1), dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, dtype=torch.float32)
+            * -(math.log(10000.0) / self.d_model)
+        )
+        pe_positive[:, 0::2] = torch.sin(position * div_term)
+        pe_positive[:, 1::2] = torch.cos(position * div_term)
+        pe_negative[:, 0::2] = torch.sin(-1 * position * div_term)
+        pe_negative[:, 1::2] = torch.cos(-1 * position * div_term)
+
+        # Reserve the order of positive indices and concat both positive and
+        # negative indices. This is used to support the shifting trick
+        # as in https://arxiv.org/abs/1901.02860
+        pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
+        pe_negative = pe_negative[1:].unsqueeze(0)
+        pe = torch.cat([pe_positive, pe_negative], dim=1)
+        self.pe = pe.to(device=x.device, dtype=x.dtype)
+
+    def forward(self, x: torch.Tensor):
+        """Add positional encoding.
+        Args:
+            x : Input tensor T X B X C.
+        Returns:
+            torch.Tensor: Encoded tensor T X B X C.
+
+        """
+        x = x.transpose(0, 1)  # Change TBC to BTC
+        self.extend_pe(x)
+        pos_emb = self.pe[
+            :,
+            self.pe.size(1) // 2 - x.size(1) + 1 : self.pe.size(1) // 2 + x.size(1),
+        ]
+        pos_emb = pos_emb.transpose(0, 1)  # change to TBC
+        return pos_emb
+ 
 class ESPNETMultiHeadedAttention(nn.Module):
     """Multi-Head Attention layer.
     Args:
@@ -346,7 +489,7 @@ class ConvolutionModule(torch.nn.Module):
         assert (
             depthwise_kernel_size - 1
         ) % 2 == 0, "kernel_size should be a odd number for 'SAME' padding"
-        self.layer_norm = LayerNorm(embed_dim, export=export)
+        self.layer_norm = nn.LayerNorm(embed_dim, export=export)
         self.pointwise_conv1 = torch.nn.Conv1d(
             embed_dim,
             2 * channels,
@@ -424,7 +567,7 @@ class FeedForwardModule(torch.nn.Module):
         """
 
         super(FeedForwardModule, self).__init__()
-        self.layer_norm = LayerNorm(input_feat)
+        self.layer_norm = nn.LayerNorm(input_feat)
         self.w_1 = torch.nn.Linear(input_feat, hidden_units, bias=bias)
         self.w_2 = torch.nn.Linear(hidden_units, input_feat, bias=bias)
         self.dropout1 = torch.nn.Dropout(dropout1)
@@ -481,7 +624,7 @@ class ConformerEncoderLayer(torch.nn.Module):
             dropout,
         )
 
-        self.self_attn_layer_norm = LayerNorm(embed_dim, export=False)
+        self.self_attn_layer_norm = torch.nn.LayerNorm(embed_dim)
         self.self_attn_dropout = torch.nn.Dropout(dropout)
         if attn_type == "espnet":
             if self.pos_enc_type == "rel_pos":
@@ -502,13 +645,6 @@ class ConformerEncoderLayer(torch.nn.Module):
                 )
             else:
                 raise Exception(f"Unsupported attention type {self.pos_enc_type}")
-        else:
-            # Default to fairseq MHA
-            self.self_attn = MultiheadAttention(
-                embed_dim,
-                attention_heads,
-                dropout=dropout,
-            )
 
         self.conv_module = ConvolutionModule(
             embed_dim=embed_dim,
@@ -525,7 +661,7 @@ class ConformerEncoderLayer(torch.nn.Module):
             dropout,
             activation_fn=activation_fn,
         )
-        self.final_layer_norm = LayerNorm(embed_dim, export=False)
+        self.final_layer_norm = nn.LayerNorm(embed_dim)
 
     def forward(
         self,
@@ -584,5 +720,84 @@ class ConformerEncoderLayer(torch.nn.Module):
         x = self.final_layer_norm(x)
         return x, (attn, layer_result)
     
-# class TransformerEncoder(nn.Module):
-    # def build_encoder_layer(self):
+class ConformerEncoder(torch.nn.Module):
+    def build_encoder_layer(self, args: TransformerEncoderConfig):
+        layer = ConformerEncoderLayer(
+            embed_dim=self.embedding_dim,
+            ffn_embed_dim=args.encoder_ffn_embed_dim,
+            attention_heads=args.encoder_attn_heads,
+            dropout=args.dropout,
+            depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+            activation_fn="swish",
+            attn_type=args.attn_type,
+            pos_enc_type=args.pos_enc_type,
+            use_fp16=args.fp16,  # only used for rope
+        )
+        return layer
+    
+    def __init__(self, args: TransformerEncoderConfig):
+        super().__init__(args)
+        self.args = args
+        self.dropout = args.dropout
+        self.embedding_dim = args.encoder_embed_dim
+        self.pos_enc_type = args.pos_enc_type
+        max_source_positions = args.max_positions
+
+        if self.pos_enc_type == "rel_pos":
+            self.embed_positions = RelPositionalEncoding(
+                max_source_positions, self.embedding_dim
+            )
+        elif self.pos_enc_type == "rope":
+            self.embed_positions = None
+        else:
+            raise Exception("Unsupported positional encoding type")
+
+        self.layers = nn.ModuleList(
+            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
+        )
+        self.layer_norm_first = args.layer_norm_first
+        self.layer_norm = nn.LayerNorm(self.embedding_dim)
+        self.layerdrop = args.encoder_layerdrop
+
+    def forward(self, x, padding_mask=None, tgt_layer=None):
+        if padding_mask is not None:
+            x = index_put(x, padding_mask, 0)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        # B X T X C here
+        position_emb = None
+        if self.pos_enc_type == "rel_pos":
+            position_emb = self.embed_positions(x)
+
+        if not self.layer_norm_first:
+            x = self.layer_norm(x)
+
+        x = F.dropout(x, p=self.dropout, training=self.training)
+
+        layer_results = []
+        r = None
+        for i, layer in enumerate(self.layers):
+            dropout_probability = np.random.random()
+            if not self.training or (dropout_probability > self.layerdrop):
+                x, z = layer(
+                    x,
+                    self_attn_padding_mask=padding_mask,
+                    need_weights=False,
+                    position_emb=position_emb,
+                )
+                if tgt_layer is not None:
+                    layer_results.append((x, z))
+            if i == tgt_layer:
+                r = x
+                break
+
+        if r is not None:
+            x = r
+
+        # T x B x C -> B x T x C
+        x = x.transpose(0, 1)
+
+        return x, layer_results
+        
