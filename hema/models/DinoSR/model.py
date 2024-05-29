@@ -282,7 +282,6 @@ class DinoSR(torch.nn.Module):
 
         self.num_updates = num_updates
   
-
     def apply_mask(
         self,
         x: torch.Tensor,
@@ -363,10 +362,18 @@ class DinoSR(torch.nn.Module):
             x = features
             mask_indices = None
         
-        x, _ = self.conformer_encoder(x, x.shape[1])
+        x, layer_results = self.conformer_encoder(x)
         
         if feature_only:
-            return x
+            return {
+                "x": x,
+                "padding_mask": padding_mask,
+                "layer_results": layer_results,
+            }
+
+        result = {
+            "losses": {},
+        }
         
         with torch.no_grad():
             self.ema.model.eval()
