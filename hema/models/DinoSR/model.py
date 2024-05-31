@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional
 from omegaconf import II
+import torch.distributed as dist
 
 from EMA import EMA
 from models.utils import compute_mask_indices, index_put, GradMultiply 
@@ -364,6 +365,7 @@ class DinoSR(torch.nn.Module):
         
         x, layer_results = self.conformer_encoder(x)
         
+        # For func extract_features().
         if feature_only:
             return {
                 "x": x,
@@ -375,6 +377,7 @@ class DinoSR(torch.nn.Module):
             "losses": {},
         }
         
+        # Teacher Model process.
         with torch.no_grad():
             self.ema.model.eval()
             
@@ -384,8 +387,120 @@ class DinoSR(torch.nn.Module):
                 mask=False
             )
         
-        target_layer_results = [l[2] for l in y["layer_results"]]
+            # Each layer has the result in [x, (attn, layer_result)] shape.
+            target_layer_results = [l[2] for l in y["layer_results"]]
+        
+            permuted = False
+            if self.cfg.instance_norm_target_layer or self.cfg.batch_norm_target_layer:
+                target_layer_results = [
+                    tl.permute(1, 2, 0) for tl in target_layer_results  # TBC -> BCT
+                ]
+                permuted = True
 
+            if self.cfg.batch_norm_target_layer:
+                target_layer_results = [
+                    F.batch_norm(
+                        tl.float(), running_mean=None, running_var=None, training=True
+                    )
+                    for tl in target_layer_results
+                ]
+
+            if self.cfg.instance_norm_target_layer:
+                target_layer_results = [
+                    F.instance_norm(tl.float()) for tl in target_layer_results
+                ]
+
+            if permuted:
+                target_layer_results = [
+                    tl.transpose(1, 2) for tl in target_layer_results  # BCT -> BTC
+                ]
+
+            if self.cfg.group_norm_target_layer:
+                target_layer_results = [
+                    F.layer_norm(tl.float(), tl.shape[-2:])
+                    for tl in target_layer_results
+                ]
+
+            if self.cfg.layer_norm_target_layer:
+                target_layer_results = [
+                    F.layer_norm(tl.float(), tl.shape[-1:])
+                    for tl in target_layer_results
+                ]
+                
+            if self.discrete:
+                target_layer_results = [
+                    tl[mask_indices] for tl in target_layer_results
+                ]
+            else:
+                y = sum(target_layer_results) / len(target_layer_results)
+
+                if self.cfg.layer_norm_targets:
+                    y = F.layer_norm(y.float(), y.shape[-1:])
+
+                if self.cfg.instance_norm_targets:
+                    y = F.instance_norm(y.float().transpose(1, 2)).transpose(1, 2)
+
+                if not permuted:
+                    y = y.transpose(0, 1)
+
+                y = y[mask_indices]
+                
+        x = x[mask_indices]
+        
+        if self.codebooks[0].device != x.device:
+            self.move_codebook_to_gpu()
+        
+        # Calculate the loss
+        losses = 0
+        target_ppl, pred_ppl = 0.0
+        
+        for i, target in enumerate(target_layer_results):
+            # Quantize target
+            with torch.no_grad():
+                codebook = self.codebooks[i].float() / self.codebook_cnts[i].unsqueeze(1)
+                neg_l2_dist = - (torch.sum(target ** 2, dim=1, keepdim=True)
+                                 + torch.sum(codebook ** 2, dim=1)
+                                 - 2 * torch.matmul(target, codebook.t()))
+                onehot_target = torch.zeros_like(neg_l2_dist)
+                onehot_target[range(len(neg_l2_dist)), neg_l2_dist.argmax(-1)] = 1.0
+            # Loss
+            pred = self.heads[i](x).float()
+            pred = F.log_softmax(pred, dim=-1)
+            loss = torch.sum(-onehot_target*pred, dim=-1)
+            losses = losses + loss
+            
+            # Compute the stats and update codebook
+            with torch.no_grad():
+                # Stats
+                target_ppl += self.compute_ppl(onehot_target,input_onehot=True)
+                pred_ppl += self.compute_ppl(pred.float(),input_onehot=False)
+                if self.training and self.codebook_decay<1:
+                    # Update codebook
+                    # move into set_num_updates?
+                    count = onehot_target.sum(0)
+                    memory = torch.matmul(onehot_target.t(), target)
+                    if dist.is_initialized():
+                        dist.all_reduce(memory) # Sum of embeddings
+                        dist.all_reduce(count) # Total counts
+                    alpha = torch.ones_like(count).unsqueeze(1)
+                    alpha[count!=0] = self.codebook_decay
+                    self.codebook_cnts[i]  = alpha.squeeze(1) * self.codebook_cnts[i] + (1-alpha).squeeze(1) * count
+                    self.codebooks[i] = alpha * self.codebooks[i] + (1-alpha) * memory
+        
+        result["losses"]["cross_entropy"] = (losses/self.n_codebooks).sum()
+        if "sample_size" not in result:
+            result["sample_size"] = loss.numel()
+        
+        with torch.no_grad():
+            result["target_ppl"] = target_ppl/self.n_codebooks
+            result["pred_ppl"] = pred_ppl/self.n_codebooks
+            result["codebook_decay"] = self.codebook_decay
+
+        if self.ema is not None:
+            result["ema_decay"] = self.ema.get_decay() * 1000
+
+        return result
+            
     def extract_features(
         self, source, padding_mask, mask=False, layer=None
     ):
@@ -397,3 +512,35 @@ class DinoSR(torch.nn.Module):
             layer=layer,
         )
         return res
+    
+    @staticmethod
+    def compute_ppl(y, input_onehot=False, tokenwise=False):
+        # We track the avg. of 1-hot (argmax)
+        if not input_onehot:
+            y = y.softmax(dim=-1)
+        if tokenwise:
+            y = 2**(- y * (y+1e-8).log2()).sum(-1)
+        y = y.mean(0)
+        if dist.is_initialized():
+            dist.all_reduce(y)
+            y = y /  dist.get_world_size()
+        if not tokenwise:
+            y = 2**(- y * (y+1e-8).log2()).sum()
+        return y
+    
+    @staticmethod
+    def compute_var(y):
+        y = y.view(-1, y.size(-1))
+        if dist.is_initialized():
+            zc = torch.tensor(y.size(0)).cuda()
+            zs = y.sum(dim=0)
+            zss = (y ** 2).sum(dim=0)
+
+            dist.all_reduce(zc)
+            dist.all_reduce(zs)
+            dist.all_reduce(zss)
+
+            var = zss / (zc - 1) - (zs ** 2) / (zc * (zc - 1))
+            return torch.sqrt(var + 1e-6).mean()
+        else:
+            return torch.sqrt(y.var(dim=0) + 1e-6).mean()
