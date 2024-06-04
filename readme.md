@@ -4,6 +4,7 @@
 #### Models:
 - Conformer.
 - Convolution blocks for up/down-sampling.
+- DinoSR.
 
 #### Visualizations:
 - Power Spectral Density (PSD).
