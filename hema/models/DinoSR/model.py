@@ -6,8 +6,9 @@ from omegaconf import II
 import torch.distributed as dist
 
 from EMA import EMA
-from models.utils import compute_mask_indices, index_put, GradMultiply 
-from nn.conv_feature_extractor import FeatureExtractor
+import hema
+from hema.models.utils import compute_mask_indices, index_put, GradMultiply 
+from hema.nn.conv_feature_extractor import FeatureExtractor
 from conformer.model import ConformerEncoder, TransformerEncoderConfig
 
 MASKING_DISTRIBUTION_CHOICES = (["static", "uniform", "normal", "poisson"])
@@ -544,3 +545,6 @@ class DinoSR(torch.nn.Module):
             return torch.sqrt(var + 1e-6).mean()
         else:
             return torch.sqrt(y.var(dim=0) + 1e-6).mean()
+        
+if __name__ == '__main__':
+    model = DinoSR()

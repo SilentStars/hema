@@ -9,7 +9,7 @@ from enum import Enum, EnumMeta
 from typing import Callable, Dict, List, Optional, Tuple
 import math
 
-from utils import index_put
+from hema.models.utils import index_put
 
 @dataclass
 class TransformerEncoderConfig():

@@ -1,6 +1,6 @@
 import torch
 
-from conv_blocks import DownsampleBlock
+from hema.nn.conv_blocks import DownsampleBlock
 from typing import List, Tuple
 
 class FeatureExtractor(torch.nn.Module):

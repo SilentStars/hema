@@ -1,1 +1,3 @@
-from hema.models.DinoSR.model import DinoSR, config
+import hema
+
+model = hema.models.DinoSR.model.DinoSR()
