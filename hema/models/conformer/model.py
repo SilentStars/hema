@@ -473,7 +473,6 @@ class ConvolutionModule(torch.nn.Module):
         dropout,
         activation_fn="swish",
         bias=False,
-        export=False,
     ):
         """
         Args:
@@ -483,13 +482,12 @@ class ConvolutionModule(torch.nn.Module):
             dropout: dropout value
             activation_fn: Activation function to use after depthwise convolution kernel
             bias: If bias should be added to conv layers
-            export: If layernorm should be exported to jit
         """
         super(ConvolutionModule, self).__init__()
         assert (
             depthwise_kernel_size - 1
         ) % 2 == 0, "kernel_size should be a odd number for 'SAME' padding"
-        self.layer_norm = nn.LayerNorm(embed_dim, export=export)
+        self.layer_norm = nn.LayerNorm(embed_dim)
         self.pointwise_conv1 = torch.nn.Conv1d(
             embed_dim,
             2 * channels,
@@ -721,27 +719,27 @@ class ConformerEncoderLayer(torch.nn.Module):
         return x, (attn, layer_result)
     
 class ConformerEncoder(torch.nn.Module):
-    def build_encoder_layer(self, args: TransformerEncoderConfig):
+    def build_encoder_layer(self, cfg: TransformerEncoderConfig):
         layer = ConformerEncoderLayer(
             embed_dim=self.embedding_dim,
-            ffn_embed_dim=args.encoder_ffn_embed_dim,
-            attention_heads=args.encoder_attn_heads,
-            dropout=args.dropout,
-            depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+            ffn_embed_dim=cfg.encoder_ffn_embed_dim,
+            attention_heads=cfg.encoder_attn_heads,
+            dropout=cfg.dropout,
+            depthwise_conv_kernel_size=cfg.depthwise_conv_kernel_size,
             activation_fn="swish",
-            attn_type=args.attn_type,
-            pos_enc_type=args.pos_enc_type,
-            use_fp16=args.fp16,  # only used for rope
+            attn_type=cfg.attn_type,
+            pos_enc_type=cfg.pos_enc_type,
+            use_fp16=cfg.fp16,  # only used for rope
         )
         return layer
     
-    def __init__(self, args: TransformerEncoderConfig):
-        super().__init__(args)
-        self.args = args
-        self.dropout = args.dropout
-        self.embedding_dim = args.encoder_embed_dim
-        self.pos_enc_type = args.pos_enc_type
-        max_source_positions = args.max_positions
+    def __init__(self, cfg: TransformerEncoderConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.dropout = cfg.dropout
+        self.embedding_dim = cfg.encoder_embed_dim
+        self.pos_enc_type = cfg.pos_enc_type
+        max_source_positions = cfg.max_positions
 
         if self.pos_enc_type == "rel_pos":
             self.embed_positions = RelPositionalEncoding(
@@ -753,11 +751,11 @@ class ConformerEncoder(torch.nn.Module):
             raise Exception("Unsupported positional encoding type")
 
         self.layers = nn.ModuleList(
-            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
+            [self.build_encoder_layer(cfg) for _ in range(cfg.encoder_layers)]
         )
-        self.layer_norm_first = args.layer_norm_first
+        self.layer_norm_first = cfg.layer_norm_first
         self.layer_norm = nn.LayerNorm(self.embedding_dim)
-        self.layerdrop = args.encoder_layerdrop
+        self.layerdrop = cfg.encoder_layerdrop
 
     def forward(self, x, padding_mask=None, tgt_layer=None):
         if padding_mask is not None:
@@ -783,18 +781,18 @@ class ConformerEncoder(torch.nn.Module):
             if not self.training or (dropout_probability > self.layerdrop):
                 x, z = layer(
                     x,
-                    self_attn_padding_mask=padding_mask,
-                    need_weights=False,
+                    encoder_padding_mask=None,
                     position_emb=position_emb,
                 )
-                if tgt_layer is not None:
-                    layer_results.append((x, z))
-            if i == tgt_layer:
-                r = x
-                break
+                layer_results.append((x, z))
+                # if tgt_layer is not None:
+                #     layer_results.append((x, z))
+            # if i == tgt_layer:
+            #     r = x
+            #     break
 
-        if r is not None:
-            x = r
+        # if r is not None:
+        #     x = r
 
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)

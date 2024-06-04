@@ -5,11 +5,10 @@ from typing import Optional
 from omegaconf import II
 import torch.distributed as dist
 
-from EMA import EMA
-import hema
+from hema.models.DinoSR.EMA import EMA
 from hema.models.utils import compute_mask_indices, index_put, GradMultiply 
 from hema.nn.conv_feature_extractor import FeatureExtractor
-from conformer.model import ConformerEncoder, TransformerEncoderConfig
+from hema.models.conformer.model import ConformerEncoder, TransformerEncoderConfig
 
 MASKING_DISTRIBUTION_CHOICES = (["static", "uniform", "normal", "poisson"])
 
@@ -111,7 +110,7 @@ class config(TransformerEncoderConfig):
     
     # Normalization related settings
     layer_norm_target_layer: bool = False
-    instance_norm_target_layer: bool = False
+    instance_norm_target_layer: bool = True
     instance_norm_targets: bool = False
     layer_norm_targets: bool = False
     batch_norm_target_layer: bool = False
@@ -154,48 +153,46 @@ class DinoSR(torch.nn.Module):
         )
         
         # Conformer Encoder
-        self.conformer_encoder = ConformerEncoder(
-            self.embed, 
-            self.embed, 
-            cfg.num_encoder_layers, 
-            cfg.num_attention_heads
-        )
+        encoder_cfg = TransformerEncoderConfig()
+        self.conformer_encoder = ConformerEncoder(cfg=encoder_cfg)
+        
         self.layer_norm = torch.nn.LayerNorm(self.extractor_dim)
         
         # Codebooks
         self.pre_encoder_copied = False
-        if self.discrete:
-            assert cfg.instance_norm_target_layer
-            assert not (cfg.layer_norm_target or cfg.instance_norm_targets)
-            
-            self.codebook_size = cfg.codebook_size
-            self.n_codebooks = cfg.average_top_k_layers
-            self.codebook_decay = cfg.codebook_init_decay
-            # Prediction Heads
-            self.heads = torch.nn.ModuleList([
-                torch.nn.Linear(
-                    cfg.encoder_embed_dim,
-                    cfg.codebook_size,
-                )
-                for i in range(self.n_codebooks)
-            ])
-            
-            # Codebook: use dictionary to store so codebooks are always in fp32
-            if cfg.normal_init_codebook:
-                codebooks = torch.normal(0.0, (1 / self.codebook_size**0.5),
-                            size=(self.n_codebooks, self.codebook_size, cfg.encoder_embed_dim))
-            else:
-                codebooks = torch.randn(self.n_codebooks, cfg.encoder_embed_dim, self.codebook_size)
-                codebooks = F.instance_norm(codebooks).transpose(1,2)
-            self.codebooks = {
-                i:codebooks[i] for i in range(self.n_codebooks)
-            }
-            self.codebook_cnts = {
-                i:torch.ones([self.codebook_size]) for i in range(self.n_codebooks)
-            }
-            self.shared_module_state_dict = None
+        assert cfg.instance_norm_target_layer
+        assert not (cfg.layer_norm_targets or cfg.instance_norm_targets)
+        
+        self.codebook_size = cfg.codebook_size
+        self.n_codebooks = cfg.average_top_k_layers
+        self.codebook_decay = cfg.codebook_init_decay
+        # Prediction Heads
+        self.heads = torch.nn.ModuleList([
+            torch.nn.Linear(
+                cfg.encoder_embed_dim,
+                cfg.codebook_size,
+            )
+            for i in range(self.n_codebooks)
+        ])
+        
+        # Codebook: use dictionary to store so codebooks are always in fp32
+        if cfg.normal_init_codebook:
+            codebooks = torch.normal(0.0, (1 / self.codebook_size**0.5),
+                        size=(self.n_codebooks, self.codebook_size, cfg.encoder_embed_dim))
+        else:
+            codebooks = torch.randn(self.n_codebooks, cfg.encoder_embed_dim, self.codebook_size)
+            codebooks = F.instance_norm(codebooks).transpose(1,2)
+        self.codebooks = {
+            i:codebooks[i] for i in range(self.n_codebooks)
+        }
+        self.codebook_cnts = {
+            i:torch.ones([self.codebook_size]) for i in range(self.n_codebooks)
+        }
+        self.shared_module_state_dict = None
         
         self.num_updates = 0
+        
+        self.make_ema_teacher()
 
     def make_ema_teacher(self):
         self.ema = EMA(self, decay=1)
@@ -252,7 +249,7 @@ class DinoSR(torch.nn.Module):
                 self.copy_shared_modules()
             self.cfg.ema_end_decay = 1
 
-        if self.ema is None and (self.discrete or self.final_proj is not None):
+        if self.ema is None:
             self.make_ema_teacher()
         elif self.training and self.ema is not None:
             if self.cfg.ema_decay != self.cfg.ema_end_decay:
@@ -291,7 +288,7 @@ class DinoSR(torch.nn.Module):
         mask_indices=None,
         mask_channel_indices=None,
     ):
-        B, C, T = x.shape
+        B, T, C = x.shape
         
         # No channel mask here.
         if self.mask_prob > 0:
@@ -325,18 +322,18 @@ class DinoSR(torch.nn.Module):
         layer=None,
         mask_indices=None,
         mask_channel_indices=None,
-        padding_count=None,
     ):
         # feature shape Batch Channel Length
         features = source
         
         features = self.feature_extractor(features)
-        features = features.transpose(1, 2)
-        # Shape B L C
-        features = self.layer_norm(features)
         
+        # B C L
+        features = features.transpose_(1, 2)
+        features = self.layer_norm(features)
         if self.post_extract_proj is not None:
             features = self.post_extract_proj(features)
+        # B L C
             
         pre_encoder_features = None
         if self.pre_encoder_copied:
@@ -365,6 +362,7 @@ class DinoSR(torch.nn.Module):
             mask_indices = None
         
         x, layer_results = self.conformer_encoder(x)
+        layer_results = layer_results[-self.average_top_k_layers:]
         
         # For func extract_features().
         if feature_only:
@@ -389,7 +387,7 @@ class DinoSR(torch.nn.Module):
             )
         
             # Each layer has the result in [x, (attn, layer_result)] shape.
-            target_layer_results = [l[2] for l in y["layer_results"]]
+            target_layer_results = [l[1][1] for l in y["layer_results"]]
         
             permuted = False
             if self.cfg.instance_norm_target_layer or self.cfg.batch_norm_target_layer:
@@ -428,23 +426,26 @@ class DinoSR(torch.nn.Module):
                     for tl in target_layer_results
                 ]
                 
-            if self.discrete:
-                target_layer_results = [
-                    tl[mask_indices] for tl in target_layer_results
-                ]
-            else:
-                y = sum(target_layer_results) / len(target_layer_results)
+            target_layer_results = [
+                tl[mask_indices] for tl in target_layer_results
+            ]
+            # if self.discrete:
+            #     target_layer_results = [
+            #         tl[mask_indices] for tl in target_layer_results
+            #     ]
+            # else:
+            #     y = sum(target_layer_results) / len(target_layer_results)
 
-                if self.cfg.layer_norm_targets:
-                    y = F.layer_norm(y.float(), y.shape[-1:])
+            #     if self.cfg.layer_norm_targets:
+            #         y = F.layer_norm(y.float(), y.shape[-1:])
 
-                if self.cfg.instance_norm_targets:
-                    y = F.instance_norm(y.float().transpose(1, 2)).transpose(1, 2)
+            #     if self.cfg.instance_norm_targets:
+            #         y = F.instance_norm(y.float().transpose(1, 2)).transpose(1, 2)
 
-                if not permuted:
-                    y = y.transpose(0, 1)
+            #     if not permuted:
+            #         y = y.transpose(0, 1)
 
-                y = y[mask_indices]
+            #     y = y[mask_indices]
                 
         x = x[mask_indices]
         
@@ -453,7 +454,7 @@ class DinoSR(torch.nn.Module):
         
         # Calculate the loss
         losses = 0
-        target_ppl, pred_ppl = 0.0
+        target_ppl, pred_ppl = 0.0, 0.0
         
         for i, target in enumerate(target_layer_results):
             # Quantize target
@@ -489,8 +490,9 @@ class DinoSR(torch.nn.Module):
                     self.codebooks[i] = alpha * self.codebooks[i] + (1-alpha) * memory
         
         result["losses"]["cross_entropy"] = (losses/self.n_codebooks).sum()
-        if "sample_size" not in result:
-            result["sample_size"] = loss.numel()
+        
+        # if "sample_size" not in result:
+        #     result["sample_size"] = loss.numel()
         
         with torch.no_grad():
             result["target_ppl"] = target_ppl/self.n_codebooks
@@ -509,7 +511,7 @@ class DinoSR(torch.nn.Module):
             source,
             padding_mask,
             mask=mask,
-            features_only=True,
+            feature_only=True,
             layer=layer,
         )
         return res
@@ -545,6 +547,3 @@ class DinoSR(torch.nn.Module):
             return torch.sqrt(var + 1e-6).mean()
         else:
             return torch.sqrt(y.var(dim=0) + 1e-6).mean()
-        
-if __name__ == '__main__':
-    model = DinoSR()
