@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional
-from omegaconf import II
+# from omegaconf import II
 import torch.distributed as dist
 
 from hema.models.DinoSR.EMA import EMA
@@ -45,7 +45,7 @@ class config(TransformerEncoderConfig):
     )
 
     # when to finish annealing ema decay rate
-    ema_anneal_end_step: int = II("optimization.max_update")
+    ema_anneal_end_step: int = field(default=400000)
 
     ema_transformer_only: bool = field(
         default=True,
@@ -57,7 +57,7 @@ class config(TransformerEncoderConfig):
     )
 
     # Update related settings
-    max_update: int = II("optimization.max_update")
+    max_update: int = field(default=400000)
 
     min_target_var: float = field(
         default=0.1, metadata={"help": "stop training if target var falls below this"}
@@ -191,15 +191,13 @@ class DinoSR(torch.nn.Module):
         self.shared_module_state_dict = None
         
         self.num_updates = 0
-        
-        self.make_ema_teacher()
 
     def make_ema_teacher(self):
         self.ema = EMA(self, decay=1)
 
     def move_codebook_to_gpu(self):
         # Move codebook to GPU
-        device = next(self.encoder.parameters()).device
+        device = next(self.conformer_encoder.parameters()).device
         self.codebooks = {
             i:self.codebooks[i].to(device) for i in range(self.n_codebooks)
         }
@@ -240,7 +238,7 @@ class DinoSR(torch.nn.Module):
             self.pre_encoder_copied = True
 
     def set_num_updates(self, num_updates):
-        super().set_num_updates(num_updates)
+        # super().set_num_updates(num_updates)
 
         if self.cfg.freeze_teacher_step!=-1 and num_updates>=self.cfg.freeze_teacher_step:
             if self.cfg.freeze_pre_enc_modules:
@@ -264,7 +262,7 @@ class DinoSR(torch.nn.Module):
                     )
                 self.ema.set_decay(decay)
             if self.ema.get_decay() < 1:
-                self.ema.step(self.encoder if self.cfg.ema_transformer_only else self)
+                self.ema.step(self.conformer_encoder if self.cfg.ema_transformer_only else self)
         
         if self.cfg.codebook_init_decay == self.cfg.codebook_end_decay:
             self.codebook_decay = self.cfg.codebook_init_decay

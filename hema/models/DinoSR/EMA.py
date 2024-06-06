@@ -21,7 +21,7 @@ class EMA:
     def restore(self, state_dict):
         self.model.load_state_dict(state_dict, strict=False)
     
-    def set_dacay(self, decay: torch.float):
+    def set_decay(self, decay: torch.float):
         self.decay = decay
         
     def get_decay(self):
