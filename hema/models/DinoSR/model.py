@@ -279,6 +279,58 @@ class DinoSR(torch.nn.Module):
 
         self.num_updates = num_updates
   
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
+        if self.shared_module_state_dict is not None:
+            self.freeze_shared_modules()
+        
+        state = super().state_dict(destination, prefix, keep_vars)
+
+        if self.ema is not None:
+            state[prefix + "_ema"] = self.ema.fp32_params
+        
+        if self.discrete:
+            for i in range(self.n_codebooks):
+                state[prefix+f'_codebook{i}'] = self.codebooks[i]
+                state[prefix+f'_codebook_cnts{i}'] = self.codebook_cnts[i]
+        
+        if self.pre_encoder_copied:
+            state[prefix+'_pre_encoder_cnn'] = self.cnn_copy.fp32_params
+            state[prefix+'_pre_encoder_ln'] = self.ln_copy.fp32_params
+            state[prefix+'_pre_encoder_proj'] = self.proj_copy.fp32_params
+
+        return state
+  
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if self.ema is not None:
+            k = prefix + "_ema"
+            assert k in state_dict
+            self.ema.restore(state_dict[k], True)
+            del state_dict[k]
+        
+        if self.discrete:
+            for i in range(self.n_codebooks):
+                k = prefix+f'_codebook{i}'
+                assert k in state_dict
+                self.codebooks[i] = state_dict[k].contiguous()
+                del state_dict[k]
+                k = prefix+f'_codebook_cnts{i}'
+                assert k in state_dict
+                self.codebook_cnts[i] = state_dict[k].contiguous()
+                del state_dict[k]
+        
+        k = prefix+'_pre_encoder_cnn'
+        if self.pre_encoder_copied:
+            assert k in state_dict
+            self.cnn_copy.restore(state_dict[k],True)
+            del state_dict[k]
+            k = prefix+'_pre_encoder_ln'
+            self.ln_copy.restore(state_dict[k],True)
+            del state_dict[k]
+            k = prefix+'_pre_encoder_proj'
+            self.proj_copy.restore(state_dict[k],True)
+            del state_dict[k]
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+  
     def apply_mask(
         self,
         x: torch.Tensor,
