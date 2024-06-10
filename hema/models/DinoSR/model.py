@@ -123,7 +123,7 @@ def get_annealed_rate(start, end, curr_step, total_steps):
 
 CONV_LAYERS = [(768, 9, 2), (768, 5, 2), (768, 5, 2)]
 class DinoSR(torch.nn.Module):
-    def __init__(self, cfg: config, encoder_cfg: TransformerEncoderConfig):
+    def __init__(self, cfg: config):
         super().__init__()
         
         self.cfg = cfg
@@ -153,8 +153,7 @@ class DinoSR(torch.nn.Module):
         )
         
         # Conformer Encoder
-        self.encoder_cfg = encoder_cfg
-        self.conformer_encoder = ConformerEncoder(cfg=self.encoder_cfg)
+        self.conformer_encoder = ConformerEncoder(cfg)
         
         self.layer_norm = torch.nn.LayerNorm(self.extractor_dim)
         
