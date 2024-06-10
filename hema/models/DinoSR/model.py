@@ -193,7 +193,18 @@ class DinoSR(torch.nn.Module):
         self.num_updates = 0
 
     def make_ema_teacher(self):
-        self.ema = EMA(self, decay=1)
+        
+        skip_keys = set()
+        # if self.cfg.ema_layers_only:
+        #     self.cfg.ema_transformer_only = True
+        #     for k, _ in self.conformer_encoder.pos_conv.named_parameters():
+        #         skip_keys.add(f"pos_conv.{k}")
+
+        self.ema = EMA(
+            self.conformer_encoder if self.cfg.ema_transformer_only else self,
+            decay=0.999,
+            skip_keys=skip_keys,
+        )
 
     def move_codebook_to_gpu(self):
         # Move codebook to GPU
@@ -288,10 +299,13 @@ class DinoSR(torch.nn.Module):
         if self.ema is not None:
             state[prefix + "_ema"] = self.ema.fp32_params
         
-        if self.discrete:
-            for i in range(self.n_codebooks):
-                state[prefix+f'_codebook{i}'] = self.codebooks[i]
-                state[prefix+f'_codebook_cnts{i}'] = self.codebook_cnts[i]
+        for i in range(self.n_codebooks):
+            state[prefix+f'_codebook{i}'] = self.codebooks[i]
+            state[prefix+f'_codebook_cnts{i}'] = self.codebook_cnts[i]
+        # if self.discrete:
+        #     for i in range(self.n_codebooks):
+        #         state[prefix+f'_codebook{i}'] = self.codebooks[i]
+        #         state[prefix+f'_codebook_cnts{i}'] = self.codebook_cnts[i]
         
         if self.pre_encoder_copied:
             state[prefix+'_pre_encoder_cnn'] = self.cnn_copy.fp32_params
@@ -307,16 +321,25 @@ class DinoSR(torch.nn.Module):
             self.ema.restore(state_dict[k], True)
             del state_dict[k]
         
-        if self.discrete:
-            for i in range(self.n_codebooks):
-                k = prefix+f'_codebook{i}'
-                assert k in state_dict
-                self.codebooks[i] = state_dict[k].contiguous()
-                del state_dict[k]
-                k = prefix+f'_codebook_cnts{i}'
-                assert k in state_dict
-                self.codebook_cnts[i] = state_dict[k].contiguous()
-                del state_dict[k]
+        for i in range(self.n_codebooks):
+            k = prefix+f'_codebook{i}'
+            assert k in state_dict
+            self.codebooks[i] = state_dict[k].contiguous()
+            del state_dict[k]
+            k = prefix+f'_codebook_cnts{i}'
+            assert k in state_dict
+            self.codebook_cnts[i] = state_dict[k].contiguous()
+            del state_dict[k]
+        # if self.discrete:
+        #     for i in range(self.n_codebooks):
+        #         k = prefix+f'_codebook{i}'
+        #         assert k in state_dict
+        #         self.codebooks[i] = state_dict[k].contiguous()
+        #         del state_dict[k]
+        #         k = prefix+f'_codebook_cnts{i}'
+        #         assert k in state_dict
+        #         self.codebook_cnts[i] = state_dict[k].contiguous()
+        #         del state_dict[k]
         
         k = prefix+'_pre_encoder_cnn'
         if self.pre_encoder_copied:
@@ -430,14 +453,24 @@ class DinoSR(torch.nn.Module):
         with torch.no_grad():
             self.ema.model.eval()
             
-            y = self.ema.model.extract_features(
-                source,
-                padding_mask,
-                mask=False
-            )
-        
-            # Each layer has the result in [x, (attn, layer_result)] shape.
-            target_layer_results = [l[1][1] for l in y["layer_results"]]
+            if self.cfg.ema_transformer_only:  
+                y, layer_results = self.ema.model(
+                    pre_encoder_features,
+                    padding_mask,
+                    tgt_layer=self.cfg.average_top_k_layers
+                )
+            else:
+                y, layer_results = self.ema.model(
+                    source,
+                    padding_mask,
+                    tgt_layer=self.cfg.average_top_k_layers
+                )
+            
+            # the shape returned by the conformer encoder is (x, layer_results)
+            # where 'layer_results' is a list of tuples
+            # each tuple has the result in [x, (attn, layer_result)] shape.
+            layer_results = layer_results[-self.average_top_k_layers:]
+            target_layer_results = [l[1][1] for l in layer_results]
         
             permuted = False
             if self.cfg.instance_norm_target_layer or self.cfg.batch_norm_target_layer:

@@ -7,9 +7,11 @@ import torch
 class EMA:
     """Exponential Moving Average"""
 
-    def __init__(self, model: torch.nn.Module, decay: torch.float = 1, device=None):
+    def __init__(self, model: torch.nn.Module, decay: torch.float = 1, device=None, skip_keys=None):
         self.decay = decay
         self.model = copy.deepcopy(model)
+        
+        self.skip_keys = skip_keys or set()
         
         for params in self.model.parameters():
             params.requires_grad_ = False
@@ -31,7 +33,7 @@ class EMA:
         decay = self.decay
         
         ema_state_dict = {}
-        ema_params = (self.model.state_dict)
+        ema_params = (self.model.state_dict())
         
         for key, param in new_model.named_parameters():
             if isinstance(param, dict):
@@ -54,9 +56,13 @@ class EMA:
                 # Do not decay a model.version pytorch param
                 continue
             
-            ema_param.mul_(decay)
-            ema_param.add_(param.data.to(dtype=ema_param.dtype), alpha=1 - decay)
-            
+            if key in self.skip_keys or not param.requires_grad:
+                ema_params[key].copy_(param.to(dtype=ema_param.dtype).data)
+                ema_param = ema_params[key]
+            else:
+                ema_param.mul_(decay)
+                ema_param.add_(param.data.to(dtype=ema_param.dtype), alpha=1 - decay)
+        
         for key, param in new_model.named_buffers():
             ema_state_dict[key] = param
         

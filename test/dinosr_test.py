@@ -8,11 +8,12 @@ if __name__ == '__main__':
     cfg = dino.config()
     model = dino.DinoSR(cfg)
     
-    # input shape (B T C)
-    rand_ts = torch.rand((16, 8, 1600)).to('cuda')
-    model.to('cuda')
-    model.set_num_updates(1)
-    # model.to('cuda')
-    res = model(rand_ts)
-    
-    print(res)
+    for i in range(0, 10):
+        # input shape (B T C)
+        rand_ts = torch.rand((16, 8, 1600)).to('cuda')
+        model.to('cuda')
+        model.set_num_updates(i)
+        # model.to('cuda')
+        res = model(rand_ts)
+        
+        print(res)
