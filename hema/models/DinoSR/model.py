@@ -295,8 +295,8 @@ class DinoSR(torch.nn.Module):
         
         state = super().state_dict(destination, prefix, keep_vars)
 
-        if self.ema is not None:
-            state[prefix + "_ema"] = self.ema.fp32_params
+        # if self.ema is not None:
+        #     state[prefix + "_ema"] = self.ema.fp32_params
         
         for i in range(self.n_codebooks):
             state[prefix+f'_codebook{i}'] = self.codebooks[i]
@@ -571,7 +571,7 @@ class DinoSR(torch.nn.Module):
                     self.codebook_cnts[i]  = alpha.squeeze(1) * self.codebook_cnts[i] + (1-alpha).squeeze(1) * count
                     self.codebooks[i] = alpha * self.codebooks[i] + (1-alpha) * memory
         
-        result["losses"]["cross_entropy"] = (losses/self.n_codebooks).sum()
+        result["losses"]["cross_entropy"] = (losses/self.n_codebooks).mean()
         
         # if "sample_size" not in result:
         #     result["sample_size"] = loss.numel()

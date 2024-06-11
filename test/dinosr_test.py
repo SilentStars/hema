@@ -5,7 +5,7 @@ import torch
 if __name__ == '__main__':
     device='cuda' if torch.cuda.is_available() else 'cpu'
     
-    cfg = dino.config(encoder_layers=6)
+    cfg = dino.config(encoder_layers=6, average_top_k_layers=4)
     model = dino.DinoSR(cfg)
     
     for i in range(0, 10):
