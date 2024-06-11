@@ -115,6 +115,8 @@ class config(TransformerEncoderConfig):
     layer_norm_targets: bool = False
     batch_norm_target_layer: bool = False
     group_norm_target_layer: bool = False
+    
+    mean_loss: bool = False
 
 def get_annealed_rate(start, end, curr_step, total_steps):
     r = end - start
@@ -146,6 +148,8 @@ class DinoSR(torch.nn.Module):
         self.mask_length = cfg.mask_length
         self.no_mask_overlap = cfg.no_mask_overlap
         self.mask_min_space = cfg.mask_min_space
+        
+        self.mean_loss = cfg.mean_loss
         
         # MASK vector
         self.mask_emb = torch.nn.Parameter(
@@ -571,8 +575,11 @@ class DinoSR(torch.nn.Module):
                     self.codebook_cnts[i]  = alpha.squeeze(1) * self.codebook_cnts[i] + (1-alpha).squeeze(1) * count
                     self.codebooks[i] = alpha * self.codebooks[i] + (1-alpha) * memory
         
-        result["losses"]["cross_entropy"] = (losses/self.n_codebooks).mean()
-        
+        if self.mean_loss:
+            result["losses"]["cross_entropy"] = (losses/self.n_codebooks).mean()
+        else:
+            result["losses"]["cross_entropy"] = (losses/self.n_codebooks).sum()
+
         # if "sample_size" not in result:
         #     result["sample_size"] = loss.numel()
         
