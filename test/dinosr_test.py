@@ -14,6 +14,4 @@ if __name__ == '__main__':
         model.to('cuda')
         model.set_num_updates(i)
         # model.to('cuda')
-        res = model(rand_ts)
-        
-        print(res)
+        res = model(rand_ts, mask=True, feature_only=False)

@@ -22,25 +22,13 @@ class DownsampleBlock(nn.Module):
         
         self.conv = nn.Sequential(
             Conv1d(num_ins, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            nn.Sequential(
-                TransposeLast(),
-                nn.LayerNorm(num_outs),
-                TransposeLast(),
-            ),
+            BatchNorm1d(num_outs),
             GELU(),
             Conv1d(num_outs, num_outs, kernel_size, 1, padding=int(kernel_size/2), bias=False),
-            nn.Sequential(
-                TransposeLast(),
-                nn.LayerNorm(num_outs),
-                TransposeLast(),
-            ),
+            BatchNorm1d(num_outs),
             GELU(),
             Conv1d(num_outs, num_outs, kernel_size, stride, padding=int(kernel_size/2), bias=False),
-            nn.Sequential(
-                TransposeLast(),
-                nn.LayerNorm(num_outs),
-                TransposeLast(),
-            ),
+            BatchNorm1d(num_outs),
         )
         self.ac = GELU()
 

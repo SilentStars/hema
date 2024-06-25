@@ -104,10 +104,6 @@ class config(TransformerEncoderConfig):
         metadata={"help": "percent of masks to unmask for each sample"},
     )
     
-    # Conformer Encoder related settings
-    num_encoder_layers: int = field(default=6)
-    num_attention_heads: int = field(default=8)
-    
     # Normalization related settings
     layer_norm_target_layer: bool = False
     instance_norm_target_layer: bool = True
@@ -117,20 +113,22 @@ class config(TransformerEncoderConfig):
     group_norm_target_layer: bool = False
     
     mean_loss: bool = False
+    
+    conv_layers: list = [(768, 9, 2), (768, 5, 2), (768, 5, 2)]
+    
 
 def get_annealed_rate(start, end, curr_step, total_steps):
     r = end - start
     pct_remaining = 1 - curr_step / total_steps
     return end - r * pct_remaining
 
-CONV_LAYERS = [(768, 9, 2), (768, 5, 2), (768, 5, 2)]
 class DinoSR(torch.nn.Module):
     def __init__(self, cfg: config):
         super().__init__()
         
         self.cfg = cfg
-        self.feature_extractor = FeatureExtractor(CONV_LAYERS)
-        self.extractor_dim = CONV_LAYERS[-1][0]
+        self.feature_extractor = FeatureExtractor(config.conv_layers)
+        self.extractor_dim = config.conv_layers[-1][0]
         
         self.ema = None
         self.embed = cfg.encoder_embed_dim
@@ -473,7 +471,7 @@ class DinoSR(torch.nn.Module):
             # where 'layer_results' is a list of tuples
             # each tuple has the result in [x, (attn, layer_result)] shape.
             layer_results = layer_results[-self.average_top_k_layers:]
-            target_layer_results = [l[1][1] for l in layer_results]
+            target_layer_results = [l[0] for l in layer_results]
         
             permuted = False
             if self.cfg.instance_norm_target_layer or self.cfg.batch_norm_target_layer:
